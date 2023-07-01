@@ -2,7 +2,7 @@ import pygame
 import sys
 import random
 
-from plot_helper import save_to_csv, plot_rewards
+from plot_helper import save_to_csv, plot_rewards, save_dict_to_csv
 
 pygame.init()
 
@@ -15,11 +15,18 @@ WHITE = (255, 255, 255)
 WINDOW_W = 600
 WINDOW_H = 400
 
+# Non situated movement
 LEFT = 1
 RIGHT = 2
 UP = 3
 DOWN = 4
 GRAB_RELEASE = 5
+
+# Situated movement
+FORWARD = 1
+BACKWARD = 2
+LEFT_ST = 3
+RIGHT_ST = 4
 
 EMPTY_FOV = 0
 WALL_FOV = 1
@@ -31,6 +38,11 @@ SEEKER_FOV = 5
 block_size = 10
 speed = block_size
 
+FOV_length = 500
+FOV_lines_number = 10
+FOV_step = int(FOV_length/FOV_lines_number)
+FOV_start_stop = int(FOV_length/2)
+
 fov_encode_map = {
     '_': EMPTY_FOV,
     'W': WALL_FOV,
@@ -38,6 +50,13 @@ fov_encode_map = {
     'HM': HAMMER_FOV,
     'HI': HIDER_FOV,
     'S' : SEEKER_FOV
+}
+
+direction_plus_values = {
+    LEFT: (-FOV_length, 0),
+    RIGHT: (FOV_length, 0),
+    UP: (0, -FOV_length),
+    DOWN: (0, FOV_length),
 }
 
 key_move_map_old = {
@@ -61,6 +80,20 @@ opposite_move_map = {
     DOWN: UP
 }
 
+situated_left_move_map = {
+    LEFT: DOWN,
+    RIGHT: UP,
+    UP: LEFT,
+    DOWN: RIGHT
+}
+
+situated_right_move_map = {
+    LEFT: UP,
+    RIGHT: DOWN,
+    UP: RIGHT,
+    DOWN: LEFT
+}
+
 direction_move_map = {
     LEFT:  (-speed, 0),
     RIGHT: (speed, 0),
@@ -79,7 +112,8 @@ direction_move_map = {
 # Define the fonts
 font = pygame.font.Font('Arial.ttf', 36)
 
-DEBUG = False
+DEBUG = True
+HEURISTICS = False
 
 screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
 
@@ -104,8 +138,9 @@ class Game:
         self.crates_group = self.generate_crates()
         self.hammers_group = self.generate_hammers()
 
-    def tick(self, action_ha=None, action_hb=None, action_sa=None, action_sb=None):
+    def tick(self, action_ha=None, action_hb=None, action_sa=None, action_sb=None, situated=False):
         g_over = False
+        winner = None
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -118,7 +153,7 @@ class Game:
 
             # Only if we are in Debug can move the player
             elif DEBUG and event.type == pygame.KEYDOWN:
-                player = self.hider_a
+                player = self.seeker_b
                 if event.key in key_move_map.keys():
                     # Get the correct button press action and translate into move
                     move = key_move_map[event.key]
@@ -162,9 +197,9 @@ class Game:
         self.text = str(int(self.counter)).rjust(3)
 
         # Perform passed action, hiders and seekers
-        self.move_hiders(action_ha, action_hb)
+        self.move_hiders(action_ha, action_hb, situated)
         # Only move the seekers if the 10 seconds have passed
-        if self.counter <= 50: self.move_seekers(action_sa, action_sb)
+        if self.counter <= 50: self.move_seekers(action_sa, action_sb, situated)
 
         seeker_a_fov, seeker_b_fov, hider_a_fov, hider_b_fov = self.get_all_fov()
 
@@ -174,15 +209,21 @@ class Game:
         self.check_hammer_wall_collisions()
 
         # Check Game over
-        if self.counter <= 0 or len(self.hiders_group) <= 0:
+        if self.counter <= 0:
+            winner = 'hiders'
             g_over = True
 
+        if len(self.hiders_group) <= 0:
+            winner = 'seekers'
+            g_over = True
+
+        # print(self.direction_to_near_hider(self.seeker_a))
         # Update the screen
-        self.screen.blit(font.render(self.text, True, WHITE), (550, 0))
+        self.screen.blit(font.render(self.text, True, WHITE), (535, 10))
         pygame.display.flip()  # update
         self.clock.tick(100)
 
-        return g_over, reward_seekers, reward_hiders
+        return g_over, reward_seekers, reward_hiders, winner
 
     def reset(self):
         self.counter, self.text = 60, '60'.rjust(3)
@@ -198,18 +239,26 @@ class Game:
         self.crates_group = self.generate_crates()
         self.hammers_group = self.generate_hammers()
 
-    def move_seekers(self, action_space_a, action_space_b):
-        # Get actions, check at which index there is a 1 value and add 1 to it
-        seeker_a_action = action_space_a.index(1) + 1  # Left = idx 0 + 1 = 1
-        seeker_b_action = action_space_b.index(1) + 1  # Grab = idx 4 + 1 = 5
+    def move_seekers(self, action_space_a, action_space_b, situated):
+        try:
+            # Get actions, check at which index there is a 1 value and add 1 to it
+            seeker_a_action = action_space_a.index(1) + 1  # Left = idx 0 + 1 = 1
+            seeker_b_action = action_space_b.index(1) + 1  # Grab = idx 4 + 1 = 5
+            # If we are in DEBUG we don't expect to have 1's in the action space
+        except ValueError:
+            if DEBUG:
+                return
+            else:
+                # Reraise error otherwise
+                raise ValueError
 
         # Move the seekers
         if self.seeker_a in self.seekers_group:
             if seeker_a_action <= 4:
-                self.seeker_a.move(seeker_a_action)
+                self.seeker_a.move(seeker_a_action, situated=situated)
                 if self.check_unit_wall_collision(self.seeker_a) or \
                         self.check_unit_crate_collision(self.seeker_a):
-                    self.seeker_a.move(opposite_move_map[seeker_a_action], moved_back=True)
+                    self.seeker_a.move(opposite_move_map[seeker_a_action], moved_back=True, situated=situated)
             else: # [0, 0, 0, 0, 1] = Grab/Release
                 for hammer in self.hammers_group:
                     if self.check_grab_proximity(self.seeker_a, hammer):
@@ -222,10 +271,10 @@ class Game:
         # Move the seekers
         if self.seeker_b in self.seekers_group:
             if seeker_b_action <= 4:
-                self.seeker_b.move(seeker_b_action)
+                self.seeker_b.move(seeker_b_action, situated=situated)
                 if self.check_unit_wall_collision(self.seeker_b) or \
                         self.check_unit_crate_collision(self.seeker_b):
-                    self.seeker_b.move(opposite_move_map[seeker_b_action], moved_back=True)
+                    self.seeker_b.move(opposite_move_map[seeker_b_action], moved_back=True, situated=situated)
             else: # [0, 0, 0, 0, 1] = Grab/Release
                 for hammer in self.hammers_group:
                     if self.check_grab_proximity(self.seeker_b, hammer):
@@ -235,17 +284,26 @@ class Game:
                         else:
                             self.seeker_b.release_object()
 
-    def move_hiders(self, action_hider_a, action_hider_b):
-        # Get actions, check at which index there is a 1 value and add 1 to it
-        hider_a_action = action_hider_a.index(1) + 1 # Left = idx 0 + 1 = 1
-        hider_b_action = action_hider_b.index(1) + 1 # Grab = idx 4 + 1 = 5
+    def move_hiders(self, action_hider_a, action_hider_b, situated=False):
+        try:
+            # Get actions, check at which index there is a 1 value and add 1 to it
+            hider_a_action = action_hider_a.index(1) + 1  # Left = idx 0 + 1 = 1
+            hider_b_action = action_hider_b.index(1) + 1  # Grab = idx 4 + 1 = 5
+
+        # If we are in DEBUG we don't expect to have 1's in the action space
+        except ValueError:
+            if DEBUG:
+                return
+            else:
+                # Reraise error otherwise
+                raise ValueError
 
         # Move the hiders
         if hider_a_action <= 4:
-            self.hider_a.move(hider_a_action)
+            self.hider_a.move(hider_a_action, situated=situated)
             if self.check_unit_wall_collision(self.hider_a) or \
                     self.check_unit_crate_collision(self.hider_a):
-                self.hider_a.move(opposite_move_map[hider_a_action], moved_back=True)
+                self.hider_a.move(opposite_move_map[hider_a_action], moved_back=True, situated=situated)
         else: # [0, 0, 0, 0, 1] = Grab/Release
             for hammer in self.hammers_group:
                 if self.check_grab_proximity(self.hider_a, hammer):
@@ -261,10 +319,10 @@ class Game:
                         self.hider_a.release_obj()
 
         if hider_b_action <= 4:
-            self.hider_b.move(hider_b_action)
+            self.hider_b.move(hider_b_action, situated=situated)
             if self.check_unit_wall_collision(self.hider_b) or \
                     self.check_unit_crate_collision(self.hider_b):
-                self.hider_b.move(opposite_move_map[hider_b_action], moved_back=True)
+                self.hider_b.move(opposite_move_map[hider_b_action], moved_back=True, situated=situated)
         else:  # [0, 0, 0, 0, 1] = Grab/Release
             for hammer in self.hammers_group:
                 if self.check_grab_proximity(self.hider_b, hammer):
@@ -315,30 +373,23 @@ class Game:
             DOWN: player.rect.midbottom,
         }
 
-        direction_plus_values = {
-            LEFT: (-100, 0),
-            RIGHT: (100, 0),
-            UP: (0, -100),
-            DOWN: (0, 100),
-        }
-
         ray_start = ray_start_xy_map[player.direction]
         add_values = direction_plus_values[player.direction]
         ray_direction = ray_start[0] + add_values[0], ray_start[1] + add_values[1]
 
         player_fov = []
-        for i in range(-50, 50, 10):
+        for i in range(-FOV_start_stop, FOV_start_stop, FOV_step):
 
             if player.direction in (LEFT, RIGHT):
                 line = pygame.draw.line(self.screen, RED,
                                         ray_start,
                                         (ray_direction[0] + 0,
-                                        ray_direction[1] + i), 2)
+                                         ray_direction[1] + i), 2)
             else:
                 line = pygame.draw.line(self.screen, RED,
                                         ray_start,
                                         (ray_direction[0] + i,
-                                        ray_direction[1] + 0), 2)
+                                         ray_direction[1] + 0), 2)
             player_fov.append(line)
 
         return player_fov
@@ -377,11 +428,11 @@ class Game:
                     collided_with_dict[self.check_axis(seeker, player_direction)] = obj_id
 
             if not len(collided_with_dict) <= 0:
-                if player_direction in (RIGHT, UP):
+                if player_direction in (RIGHT, DOWN):
                     min_key = min(collided_with_dict)
                     collided_with = collided_with_dict[min_key][:-1]
 
-                elif player_direction in (LEFT, DOWN):
+                elif player_direction in (LEFT, UP):
                     min_key = max(collided_with_dict)
                     collided_with = collided_with_dict[min_key][:-1]
 
@@ -401,6 +452,44 @@ class Game:
             reward_hiders, reward_seekers = -1, 1
 
         return reward_hiders, reward_seekers
+
+    def direction_to_near_hider(self, player):
+        # Euclidian distance to the nearest player
+        enemy = min([hider for hider in self.hiders_group],
+                    key=lambda hider: pow(hider.rect.x - player.rect.x, 2) + pow(hider.rect.y - player.rect.y, 2))
+
+        dx = enemy.rect.x - player.rect.x
+        dy = enemy.rect.y - player.rect.y
+
+        if abs(dx) > abs(dy):
+            if dx < 0:
+                return LEFT
+            else:
+                return RIGHT
+        else:
+            if dy < 0:
+                return UP
+            else:
+                return DOWN
+
+    def direction_to_near_seeker(self, player):
+        # Euclidian distance to the nearest player
+        enemy = min([seeker for seeker in self.seekers_group],
+                    key=lambda seeker: pow(seeker.rect.x - player.rect.x, 2) + pow(seeker.rect.y - player.rect.y, 2))
+
+        dx = enemy.rect.x - player.rect.x
+        dy = enemy.rect.y - player.rect.y
+
+        if abs(dx) > abs(dy):
+            if dx < 0:
+                return LEFT
+            else:
+                return RIGHT
+        else:
+            if dy < 0:
+                return UP
+            else:
+                return DOWN
 
     @staticmethod
     def encode_fov(fov):
@@ -479,8 +568,8 @@ class Game:
 
     @staticmethod
     def generate_seekers():
-        seeker_a = Seeker(0, 50)
-        seeker_b = Seeker(0, 150)
+        seeker_a = Seeker(25, 50)
+        seeker_b = Seeker(25, 150)
 
         return seeker_a, seeker_b, pygame.sprite.Group(seeker_a, seeker_b)
 
@@ -491,7 +580,12 @@ class Game:
         wall3 = Wall(WHITE, 375 - block_size, 350, block_size, 50)
         wall4 = Wall(WHITE, 375 - block_size, 250, 175, block_size)
 
-        return pygame.sprite.Group(wall1, wall2, wall3, wall4)
+        #wall5 = Wall(WHITE, 0, 0, block_size, 400)
+        #wall6 = Wall(WHITE, 0, 0, WINDOW_W, block_size)
+        #wall7 = Wall(WHITE, WINDOW_W-block_size, 0, block_size, WINDOW_H)
+        #wall8 = Wall(WHITE, 0, WINDOW_H-block_size, WINDOW_W, block_size)
+
+        return pygame.sprite.Group(wall1, wall2, wall3, wall4) #, wall5, wall6, wall7, wall8)
 
     @staticmethod
     def generate_crates():
@@ -507,6 +601,20 @@ class Game:
 
         return pygame.sprite.Group(hammer1, hammer2)
 
+    # Heuristics operations
+    def get_state_heuristics_seeker(self, seeker):
+        if 'HI' in seeker.fov:
+            return True, self.direction_to_near_hider(seeker) - 1
+        else:
+            return False, random.randint(0, 4) - 1  # random.randint(0, 4)
+
+    def get_state_heuristics_hider(self, hider, seen):
+        # If seen move opposite of the seeker
+        if seen:
+            return opposite_move_map[self.direction_to_near_seeker(hider)] - 1
+        else:
+            return random.randint(0, 4)
+
 
 class Hider(pygame.sprite.Sprite):
     def __init__(self, x, y):
@@ -520,9 +628,17 @@ class Hider(pygame.sprite.Sprite):
         self.grabbed_obj = False
         self.obj_rect = None
 
-    def move(self, direction, moved_back=False):
+        self.situated_move_map = {
+            FORWARD: direction_move_map[self.direction],
+            BACKWARD: direction_move_map[opposite_move_map[self.direction]],
+            LEFT_ST: direction_move_map[situated_left_move_map[self.direction]],
+            RIGHT_ST: direction_move_map[situated_right_move_map[self.direction]],
+        }
+
+    def move(self, direction, moved_back=False, situated=False):
         # Get move coordinates and set players direction
-        x, y = direction_move_map[direction]
+        # This is based on whether the movement is situated or not
+        x, y = direction_move_map[direction] if not situated else self.situated_move_map[direction]
         if not moved_back: self.direction = direction
 
         # Move the player
@@ -566,9 +682,16 @@ class Seeker(pygame.sprite.Sprite):
         self.grabbed_obj = False
         self.obj_rect = None
 
-    def move(self, direction, moved_back=False):
+        self.situated_move_map = {
+            FORWARD: direction_move_map[self.direction],
+            BACKWARD: direction_move_map[opposite_move_map[self.direction]],
+            LEFT_ST: direction_move_map[situated_left_move_map[self.direction]],
+            RIGHT_ST: direction_move_map[situated_right_move_map[self.direction]],
+        }
+
+    def move(self, direction, moved_back=False, situated=False):
         # Get move coordinates and set players direction
-        x, y = direction_move_map[direction]
+        x, y = direction_move_map[direction] if not situated else self.situated_move_map[direction]
         if not moved_back: self.direction = direction
 
         # Move the player
@@ -641,68 +764,201 @@ if __name__ == '__main__':
         screen
     )
 
-    hiders_total_interaction_times = []
-    seekers_total_interaction_times = []
+    if DEBUG:
+        while True:
 
-    plot_hider_rewards = []
-    plot_mean_hider_rewards = []
-    reward_hider_team = 0
-    total_reward_hider_team = 0
+            # Clear and then update the screen
+            game.screen.fill(LIME)
+            game.hiders_group.draw(game.screen)
+            game.seekers_group.draw(game.screen)
+            game.walls_group.draw(game.screen)
+            game.crates_group.draw(game.screen)
+            game.hammers_group.draw(game.screen)
 
-    plot_seeker_rewards = []
-    plot_mean_seeker_rewards = []
-    reward_seeker_team = 0
-    total_reward_seeker_team = 0
+            hider_seen_b, seeker_b_state = game.get_state_heuristics_seeker(game.seeker_b)
+            print(game.seeker_b.fov)
+            print(hider_seen_b, seeker_b_state)
+            sb_action = [0, 0, 0, 0, 0]
+            sb_action[seeker_b_state] = 1
 
-    # game loop
-    n_games = 0
-    while True:
-        # Tick with the logic in place
-        action_sa, action_sb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
-        idx1, idx2 = random.randint(0, 4), random.randint(0, 4)
-        action_sa[idx1] = 1
-        action_sb[idx2] = 1
+            game_over, _, _, _ = game.tick([0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], sb_action)
 
-        action_ha, action_hb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
-        idx3, idx4 = random.randint(0, 4), random.randint(0, 4)
-        action_ha[idx3] = 1
-        action_hb[idx4] = 1
+            #if game_over:
+               # game.reset()
 
-        game_over, r_seekers, r_hiders = game.tick(action_ha, action_hb, action_sa, action_sb)
-        reward_hider_team += r_hiders
-        reward_seeker_team += r_seekers
-        # Clear and then update the screen
-        game.screen.fill(LIME)
-        game.hiders_group.draw(game.screen)
-        game.seekers_group.draw(game.screen)
-        game.walls_group.draw(game.screen)
-        game.crates_group.draw(game.screen)
-        game.hammers_group.draw(game.screen)
+    elif HEURISTICS:
+        file_name = 'heuristics'  # '_situated' if situated_moves else '_regular'
+        motivation_suffix = 'fov100'  # '_intrinsic' if intrinsic_motivation else ''  # emergent
+        round_winners = {'hiders': 0, 'seekers': 0}
+        hiders_total_interaction_times = []
+        seekers_total_interaction_times = []
 
-        if game_over:
-            n_games += 1
+        plot_hider_rewards = []
+        plot_mean_hider_rewards = []
+        reward_hider_team = 0
+        total_reward_hider_team = 0
+        best_hider_team_reward = float('-inf')
 
-            hiders_total_interaction_times.append(game.hider_a.interaction_times + game.hider_b.interaction_times)
-            seekers_total_interaction_times.append(game.seeker_a.interaction_times + game.seeker_b.interaction_times)
+        plot_seeker_rewards = []
+        plot_mean_seeker_rewards = []
+        reward_seeker_team = 0
+        total_reward_seeker_team = 0
+        best_seeker_team_reward = float('-inf')
 
-            game.reset()
+        n_games = 0
+        while True:
+            # Clear and then update the screen
+            game.screen.fill(LIME)
+            game.hiders_group.draw(game.screen)
+            game.seekers_group.draw(game.screen)
+            game.walls_group.draw(game.screen)
+            game.crates_group.draw(game.screen)
+            game.hammers_group.draw(game.screen)
 
-            plot_hider_rewards.append(reward_hider_team)
-            plot_seeker_rewards.append(reward_seeker_team)
+            # Return action to 0 pos
+            action_sa, action_sb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
+            action_ha, action_hb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
 
-            # Calculate the mean scores over the games played so far
-            total_reward_hider_team += reward_hider_team
-            total_reward_seeker_team += reward_seeker_team
+            # Get the previous game state for seekers
+            hider_seen_a, seeker_a_state = game.get_state_heuristics_seeker(game.seeker_a)
+            hider_seen_b, seeker_b_state = game.get_state_heuristics_seeker(game.seeker_b)
 
-            plot_mean_hider_rewards.append(total_reward_hider_team/n_games)
-            plot_mean_seeker_rewards.append(total_reward_seeker_team/n_games)
+            # Get the previous game state for hiders
+            hiders_seen = max(hider_seen_a, hider_seen_b)  # max(True False) == True
+            hider_a_state = game.get_state_heuristics_hider(game.hider_a, hiders_seen)
+            hider_b_state = game.get_state_heuristics_hider(game.hider_b, hiders_seen)
 
-            reward_hider_team, reward_seeker_team = 0, 0
+            # Get the move based on the previous game state for seekers
+            print("STATE:", seeker_a_state, seeker_b_state)
+            action_sa[seeker_a_state] = 1
+            action_sb[seeker_b_state] = 1
 
-            save_to_csv(plot_hider_rewards, 'random_hider_rewards.csv')
-            save_to_csv(plot_seeker_rewards, 'random_seeker_rewards.csv')
-            save_to_csv(hiders_total_interaction_times, 'random_hiders_interaction.csv')
-            save_to_csv(seekers_total_interaction_times, 'random_seekers_interaction.csv')
+            # Get the move based on the previous game state for hiders
+            action_ha[hider_a_state] = 1
+            action_hb[hider_b_state] = 1
 
-            plot_rewards(plot_hider_rewards, plot_seeker_rewards, plot_mean_hider_rewards, plot_mean_seeker_rewards)
+            # Perform action and add rewards to teams
+            game_over, r_seekers, r_hiders, winner = game.tick(action_ha, action_hb, action_sa, action_sb)
+            reward_hider_team += r_hiders
+            reward_seeker_team += r_seekers
+
+            print(reward_hider_team, reward_seeker_team)
+            if game_over:
+                # Write down the number of times both teams interacted with objects
+                hiders_total_interaction_times.append(game.hider_a.interaction_times + game.hider_b.interaction_times)
+                seekers_total_interaction_times.append(
+                    game.seeker_a.interaction_times + game.seeker_b.interaction_times)
+
+                # Collect round winner data
+                round_winners[winner] += 1
+
+                # Reset game and all player instances
+                game.reset()
+
+                # Add number of games
+                n_games += 1
+
+                print('R_hiders:', reward_hider_team, 'Games', n_games)
+                print('R_seekers:', reward_seeker_team, 'Games', n_games)
+
+                print('Round Winners: {}'.format(round_winners))
+
+                plot_hider_rewards.append(reward_hider_team)
+                plot_seeker_rewards.append(reward_seeker_team)
+
+                # Calculate the mean scores over the games played so far
+                total_reward_hider_team += reward_hider_team
+                total_reward_seeker_team += reward_seeker_team
+
+                plot_mean_hider_rewards.append(total_reward_hider_team / n_games)
+                plot_mean_seeker_rewards.append(total_reward_seeker_team / n_games)
+
+                reward_hider_team, reward_seeker_team = 0, 0
+                # total_score += r_hiders
+                # mean_score = total_score / agent_ha.n_games
+                # plot_hider_mean_rewards.append(mean_score)
+                save_to_csv(plot_hider_rewards, 'hider_rewards{}{}.csv'.format(file_name,
+                                                                               motivation_suffix))
+                save_to_csv(plot_seeker_rewards, 'seeker_rewards{}{}.csv'.format(file_name,
+                                                                                 motivation_suffix))
+                save_to_csv(hiders_total_interaction_times, 'hiders_interaction{}{}.csv'.format(file_name,
+                                                                                                motivation_suffix))
+                save_to_csv(seekers_total_interaction_times, 'seekers_interaction{}{}.csv'.format(file_name,
+                                                                                                  motivation_suffix))
+                save_dict_to_csv(round_winners, 'round_winners{}{}.csv'.format(file_name,
+                                                                               motivation_suffix))
+
+                plot_rewards(plot_hider_rewards, plot_seeker_rewards, plot_mean_hider_rewards, plot_mean_seeker_rewards)
+
+                if n_games >= 2000:
+                    break
+                # plot_interaction(hiders_interaction_times, seekers_interaction_times)
+
+    else:
+        pass
+
+        hiders_total_interaction_times = []
+        seekers_total_interaction_times = []
+
+        plot_hider_rewards = []
+        plot_mean_hider_rewards = []
+        reward_hider_team = 0
+        total_reward_hider_team = 0
+
+        plot_seeker_rewards = []
+        plot_mean_seeker_rewards = []
+        reward_seeker_team = 0
+        total_reward_seeker_team = 0
+
+        # game loop
+        n_games = 0
+        while True:
+            # Tick with the logic in place
+            action_sa, action_sb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
+            idx1, idx2 = random.randint(0, 4), random.randint(0, 4)
+            action_sa[idx1] = 1
+            action_sb[idx2] = 1
+
+            action_ha, action_hb = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]
+            idx3, idx4 = random.randint(0, 4), random.randint(0, 4)
+            action_ha[idx3] = 1
+            action_hb[idx4] = 1
+
+            game_over, r_seekers, r_hiders = game.tick(action_ha, action_hb, action_sa, action_sb)
+            reward_hider_team += r_hiders
+            reward_seeker_team += r_seekers
+            # Clear and then update the screen
+            game.screen.fill(LIME)
+            game.hiders_group.draw(game.screen)
+            game.seekers_group.draw(game.screen)
+            game.walls_group.draw(game.screen)
+            game.crates_group.draw(game.screen)
+            game.hammers_group.draw(game.screen)
+
+            if game_over:
+                n_games += 1
+
+                hiders_total_interaction_times.append(game.hider_a.interaction_times + game.hider_b.interaction_times)
+                seekers_total_interaction_times.append(game.seeker_a.interaction_times + game.seeker_b.interaction_times)
+
+                game.reset()
+
+                plot_hider_rewards.append(reward_hider_team)
+                plot_seeker_rewards.append(reward_seeker_team)
+
+                # Calculate the mean scores over the games played so far
+                total_reward_hider_team += reward_hider_team
+                total_reward_seeker_team += reward_seeker_team
+
+                plot_mean_hider_rewards.append(total_reward_hider_team/n_games)
+                plot_mean_seeker_rewards.append(total_reward_seeker_team/n_games)
+
+                reward_hider_team, reward_seeker_team = 0, 0
+
+                save_to_csv(plot_hider_rewards, 'random_hider_rewards.csv')
+                save_to_csv(plot_seeker_rewards, 'random_seeker_rewards.csv')
+                save_to_csv(hiders_total_interaction_times, 'random_hiders_interaction.csv')
+                save_to_csv(seekers_total_interaction_times, 'random_seekers_interaction.csv')
+
+                plot_rewards(plot_hider_rewards, plot_seeker_rewards, plot_mean_hider_rewards, plot_mean_seeker_rewards)
 

@@ -68,3 +68,13 @@ def save_to_csv(scores_list, file_name):
 
     df = pd.DataFrame(scores_list)
     df.to_csv(file_name, index=False, header=False)
+
+
+def save_dict_to_csv(round_winners, file_name):
+    model_folder_path = './pandas_plots'
+    if not os.path.exists(model_folder_path):
+        os.makedirs(model_folder_path)
+    file_name = os.path.join(model_folder_path, file_name)
+
+    df = pd.DataFrame.from_dict(round_winners, orient="index")
+    df.to_csv(file_name)

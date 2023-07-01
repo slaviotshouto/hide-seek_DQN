@@ -11,12 +11,14 @@ import numpy as np
 from collections import deque  # data structure where we want to store our memory
 from hide_seek import Game, screen, LIME
 from model import Linear_QNet, QTrainer
-from plot_helper import plot_rewards, plot_interaction, save_to_csv
+from plot_helper import plot_rewards, plot_interaction, save_to_csv, save_dict_to_csv
 
 MAX_MEMORY = 100_000
 BATCH_SIZE = 1000
 LR = 0.001
 
+SITUATED = True
+INTRINSIC = False
 
 class Agent:
 
@@ -82,7 +84,7 @@ class Agent:
         # Get the action based on the state
         # At the beggining do some random moves: Exploration / exploitation
         # The better our agent gets, the less random moves we want to get and the more we want to explore
-        self.epsilon = 100 - self.n_games  # We can play around with this value
+        self.epsilon = 80 - self.n_games  # We can play around with this value
         final_move = [0, 0, 0, 0, 0]  # LEFT, RIGHT, UP, DOWN, GRAB/RELEASE
 
         # The more games, the smaller the epsilon, the less frequent we move randomly
@@ -92,7 +94,7 @@ class Agent:
         else:
             # Convert to tensor
             state0 = torch.tensor(state, dtype=torch.float)
-            prediction = self.model(state0) # Predict the action based on one state (This executes the forward function)
+            prediction = self.model(state0)  # Predict the action based on one state (This executes the forward function)
             # It will return a list, containing raw float values, from which we want the argmax
             # Then we set the argmax item to 1
             move = torch.argmax(prediction).item()  # Int
@@ -101,7 +103,10 @@ class Agent:
         return final_move
 
 
-def train():
+def train(intrinsic_motivation=False, situated_moves=False):
+    file_name = 'RETESTED_situated'  # '_situated' if situated_moves else '_regular'
+    motivation_suffix = 'fov100'  # '_intrinsic' if intrinsic_motivation else ''  # emergent
+    round_winners = {'hiders': 0, 'seekers': 0}
     hiders_total_interaction_times = []
     seekers_total_interaction_times = []
 
@@ -150,7 +155,7 @@ def train():
         action_sb = agent_sb.get_action(seeker_b_state_old)
 
         # Perform action and add rewards to teams
-        game_over, r_seekers, r_hiders = game.tick(action_ha, action_hb, action_sa, action_sb)
+        game_over, r_seekers, r_hiders, winner = game.tick(action_ha, action_hb, action_sa, action_sb, situated_moves)
         reward_hider_team += r_hiders
         reward_seeker_team += r_seekers
 
@@ -184,6 +189,9 @@ def train():
             hiders_total_interaction_times.append(game.hider_a.interaction_times + game.hider_b.interaction_times)
             seekers_total_interaction_times.append(game.seeker_a.interaction_times + game.seeker_b.interaction_times)
 
+            # Collect round winner data
+            round_winners[winner] += 1
+
             # Reset game and all player instances
             game.reset()
 
@@ -199,18 +207,20 @@ def train():
             agent_sa.train_long_memory()
             agent_sb.train_long_memory()
 
-            if reward_hider_team > best_hider_team_reward:
-                best_hider_team_reward = reward_hider_team
-                agent_ha.model.save('model_ha.pth')
-                agent_hb.model.save('model_hb.pth')
+            # if reward_hider_team > best_hider_team_reward:
+            #     best_hider_team_reward = reward_hider_team
+            agent_ha.model.save('model_ha{}.pth'.format(file_name))
+            agent_hb.model.save('model_hb{}.pth'.format(file_name))
 
-            if reward_seeker_team > best_seeker_team_reward:
-                best_seeker_team_reward = reward_seeker_team
-                agent_sa.model.save('model_sa.pth')
-                agent_sb.model.save('model_sb.pth')
+            # if reward_seeker_team > best_seeker_team_reward:
+            #     best_seeker_team_reward = reward_seeker_team
+            agent_sa.model.save('model_sa{}.pth'.format(file_name))
+            agent_sb.model.save('model_sb{}.pth'.format(file_name))
 
             print('R_hiders:', reward_hider_team, 'Games', agent_ha.n_games)
             print('R_seekers:', reward_seeker_team, 'Games', agent_sa.n_games)
+
+            print('Round Winners: {}'.format(round_winners))
 
             plot_hider_rewards.append(reward_hider_team)
             plot_seeker_rewards.append(reward_seeker_team)
@@ -226,13 +236,27 @@ def train():
             # total_score += r_hiders
             # mean_score = total_score / agent_ha.n_games
             # plot_hider_mean_rewards.append(mean_score)
-            save_to_csv(plot_hider_rewards, 'hider_rewards.csv')
-            save_to_csv(plot_seeker_rewards, 'seeker_rewards.csv')
-            save_to_csv(hiders_total_interaction_times, 'hiders_interaction.csv')
-            save_to_csv(seekers_total_interaction_times, 'seekers_interaction.csv')
+            save_to_csv(plot_hider_rewards, 'hider_rewards{}{}.csv'.format(file_name,
+                                                                           motivation_suffix))
+            save_to_csv(plot_seeker_rewards, 'seeker_rewards{}{}.csv'.format(file_name,
+                                                                             motivation_suffix))
+            save_to_csv(hiders_total_interaction_times, 'hiders_interaction{}{}.csv'.format(file_name,
+                                                                                            motivation_suffix))
+            save_to_csv(seekers_total_interaction_times, 'seekers_interaction{}{}.csv'.format(file_name,
+                                                                                              motivation_suffix))
+            save_dict_to_csv(round_winners, 'round_winners{}{}.csv'.format(file_name,
+                                                                           motivation_suffix))
 
             plot_rewards(plot_hider_rewards, plot_seeker_rewards, plot_mean_hider_rewards, plot_mean_seeker_rewards)
+
+            if agent_ha.n_games >= 2000:
+                break
             # plot_interaction(hiders_interaction_times, seekers_interaction_times)
 
+
 if __name__ == '__main__':
-    train()
+    # Set global variables to preference
+    situated = True if SITUATED else False
+    intrinsic = True if INTRINSIC else False
+
+    train(intrinsic_motivation=intrinsic, situated_moves=situated)
